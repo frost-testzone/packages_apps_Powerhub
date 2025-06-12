@@ -26,6 +26,7 @@
  import android.widget.ListView;
  import android.widget.Toast;
  import android.provider.Settings;
+ import android.text.TextUtils;
  
  import androidx.activity.result.ActivityResultLauncher;
  import androidx.activity.result.contract.ActivityResultContracts;
@@ -317,22 +318,53 @@
              Document doc = dBuilder.parse(in);
              doc.getDocumentElement().normalize();
 
-             JSONObject keyboxJson = new JSONObject();
+             Element root = doc.getDocumentElement();
+             if (root == null || !"AndroidAttestation".equals(root.getNodeName())) {
+                 Log.e(TAG, "Invalid root element. Expected <AndroidAttestation>");
+                 showToast(R.string.import_failed);
+                 return;
+             }
 
              NodeList keyboxes = doc.getElementsByTagName("Keybox");
+             if (keyboxes.getLength() == 0) {
+                 Log.e(TAG, "No <Keybox> element found in XML.");
+                 showToast(R.string.import_failed);
+                 return;
+             }
+
+             JSONObject keyboxJson = new JSONObject();
 
              for (int i = 0; i < keyboxes.getLength(); i++) {
                  Element keyboxElement = (Element) keyboxes.item(i);
                  NodeList keys = keyboxElement.getElementsByTagName("Key");
 
+                 if (keys.getLength() == 0) {
+                     Log.w(TAG, "No <Key> entries in <Keybox>. Skipping.");
+                     continue;
+                 }
+
                  for (int j = 0; j < keys.getLength(); j++) {
                      Element keyElement = (Element) keys.item(j);
                      String algorithm = keyElement.getAttribute("algorithm").toUpperCase();
+                     if (TextUtils.isEmpty(algorithm)) {
+                         Log.w(TAG, "Missing 'algorithm' attribute in <Key>. Skipping.");
+                         continue;
+                     }
+
                      if (algorithm.equals("ECDSA")) algorithm = "EC";
 
                      Element privKeyElem = (Element) keyElement.getElementsByTagName("PrivateKey").item(0);
+                     if (privKeyElem == null) {
+                         Log.w(TAG, "No <PrivateKey> found for algorithm " + algorithm + ". Skipping.");
+                         continue;
+                     }
+
                      String privKeyRaw = getRawText(privKeyElem);
                      String privKey = extractBase64FromPEM(privKeyRaw);
+                     if (TextUtils.isEmpty(privKey)) {
+                         Log.w(TAG, "Empty private key for " + algorithm + ". Skipping.");
+                         continue;
+                     }
                      keyboxJson.put(algorithm + ".PRIV", privKey);
 
                      NodeList certList = keyElement.getElementsByTagName("Certificate");
@@ -340,9 +372,19 @@
                          Element certElem = (Element) certList.item(k);
                          String certRaw = getRawText(certElem);
                          String cert = extractBase64FromPEM(certRaw);
-                         keyboxJson.put(algorithm + ".CERT_" + (k + 1), cert);
+                         if (!TextUtils.isEmpty(cert)) {
+                             keyboxJson.put(algorithm + ".CERT_" + (k + 1), cert);
+                         } else {
+                             Log.w(TAG, "Empty certificate #" + (k + 1) + " for " + algorithm);
+                         }
                      }
                  }
+             }
+
+             if (keyboxJson.length() == 0) {
+                 Log.e(TAG, "Parsed keybox is empty. Import failed.");
+                 showToast(R.string.import_failed);
+                 return;
              }
 
              Settings.System.putString(requireContext().getContentResolver(),
